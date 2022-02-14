@@ -10,7 +10,7 @@ use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::GetCurrentProcess;
 use winapi::um::winbase::*;
 use winapi::um::winnt::{
-    DUPLICATE_SAME_ACCESS, FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD
+    DUPLICATE_SAME_ACCESS, FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE
 };
 
 use crate::windows::dcb;
@@ -237,14 +237,16 @@ impl SerialPort for COMPort {
     }
 
     fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
-        let milliseconds = timeout.as_secs() * 1000 + timeout.subsec_nanos() as u64 / 1_000_000;
-
         // Populate COMMTIMEOUTS per this pull request, https://gitlab.com/susurrus/serialport-rs/-/merge_requests/78,
         // in order to achieve similar serial timeout behavior to posix implementation of serialport-rs.
+        // Using modification from mio-serial, https://github.com/berkowski/mio-serial/blob/master/src/lib.rs
         let mut timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: MAXDWORD,
-            ReadTotalTimeoutMultiplier: MAXDWORD,
-            ReadTotalTimeoutConstant: milliseconds as DWORD,
+            // wait at most 1ms between two bytes (0 means no timeout)
+            ReadIntervalTimeout: 1,
+            // disable "total" timeout to wait at least 1 byte forever
+            ReadTotalTimeoutMultiplier: 0,
+            ReadTotalTimeoutConstant: 0,
+            // write timeouts are just copied from serialport-rs
             WriteTotalTimeoutMultiplier: 0,
             WriteTotalTimeoutConstant: 0,
         };
