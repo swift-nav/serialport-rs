@@ -41,8 +41,7 @@ use crate::{Result, SerialPortInfo};
 #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "libudev"))]
 fn udev_property_as_string(d: &libudev::Device, key: &str) -> Option<String> {
     d.property_value(key)
-        .and_then(OsStr::to_str)
-        .map_or(None, |s| Some(s.to_string()))
+        .and_then(OsStr::to_str).map(|s| s.to_string())
 }
 
 /// Retrieves the udev property value named by `key`. This function assumes that the retrieved

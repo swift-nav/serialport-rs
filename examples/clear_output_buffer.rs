@@ -51,7 +51,7 @@ fn main() {
     let baud_rate = matches.value_of("baud").unwrap();
     let block_size = value_t!(matches, "block-size", usize).unwrap_or_else(|e| e.exit());
 
-    let exit_code = match run(&port_name, &baud_rate, block_size) {
+    let exit_code = match run(port_name, baud_rate, block_size) {
         Ok(_) => 0,
         Err(e) => {
             println!("Error: {}", e);
@@ -123,7 +123,7 @@ fn input_service() -> mpsc::Receiver<()> {
                     break;
                 }
                 Ok(_) => tx.send(()).unwrap(), // Signal main to clear the buffer
-                Err(e) => panic!(e),
+                Err(e) => panic!("{}", e),
             }
         }
     });

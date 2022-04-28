@@ -60,7 +60,7 @@ fn main() {
     let port_name = matches.value_of("port").unwrap();
     let baud_rate = matches.value_of("baud").unwrap();
 
-    let exit_code = match run(&port_name, &baud_rate) {
+    let exit_code = match run(port_name, baud_rate) {
         Ok(_) => 0,
         Err(e) => {
             println!("Error: {}", e);
@@ -124,7 +124,7 @@ fn input_service() -> mpsc::Receiver<()> {
                     break;
                 }
                 Ok(_) => tx.send(()).unwrap(), // Signal main to clear the buffer
-                Err(e) => panic!(e),
+                Err(e) => panic!("{}", e),
             }
         }
     });

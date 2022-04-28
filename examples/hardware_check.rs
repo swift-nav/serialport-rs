@@ -47,7 +47,7 @@ fn main() {
     let port1_loopback = matches.is_present("loopback");
 
     // Loopback mode is only available when a single port is specified
-    if port1_loopback && port2_name != "" {
+    if port1_loopback && !port2_name.is_empty() {
         eprintln!("ERROR: loopback mode can only be enabled when a single port is specified.");
         ::std::process::exit(1);
     }
@@ -62,7 +62,7 @@ fn main() {
     };
     test_single_port(&mut *port1, port1_loopback);
 
-    if port2_name != "" {
+    if !port2_name.is_empty() {
         // Run single-port tests on port2
         let mut port2 = match serialport::new(port2_name, 9600).open() {
             Err(e) => {

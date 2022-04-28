@@ -81,7 +81,7 @@ fn main() {
         &string, &port_name, &baud_rate, &rate
     );
     loop {
-        match port.write(&string.as_bytes()) {
+        match port.write(string.as_bytes()) {
             Ok(_) => {
                 print!("{}", &string);
                 std::io::stdout().flush().unwrap();
