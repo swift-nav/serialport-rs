@@ -56,6 +56,26 @@ pub enum BreakDuration {
     Arbitrary(std::num::NonZeroI32),
 }
 
+/// Wrapper for RawFd to assure that it's properly closed,
+/// even if the enclosing function exits early.
+///
+/// This is similar to the (nightly-only) std::os::unix::io::OwnedFd.
+struct OwnedFd(RawFd);
+
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        let _ = close(self.0);
+    }
+}
+
+impl OwnedFd {
+    fn into_raw(self) -> RawFd {
+        let fd = self.0;
+        mem::forget(self);
+        fd
+    }
+}
+
 impl TTYPort {
     /// Opens a TTY device as a serial port.
     ///
@@ -63,6 +83,10 @@ impl TTYPort {
     ///
     /// Ports are opened in exclusive mode by default. If this is undesireable
     /// behavior, use `TTYPort::set_exclusive(false)`.
+    ///
+    /// If the port settings differ from the default settings, characters received
+    /// before the new settings become active may be garbled. To remove those
+    /// from the receive buffer, call `TTYPort::clear(ClearBuffer::Input)`.
     ///
     /// ## Errors
     ///
@@ -72,68 +96,56 @@ impl TTYPort {
     /// * `Io` for any other error while opening or initializing the device.
     pub fn open(builder: &SerialPortBuilder) -> Result<TTYPort> {
         use nix::fcntl::FcntlArg::F_SETFL;
-        use nix::libc::{cfmakeraw, tcflush, tcgetattr, tcsetattr};
+        use nix::libc::{cfmakeraw, tcgetattr, tcsetattr};
 
         let path = Path::new(&builder.path);
-        let fd = nix::fcntl::open(
+        let fd = OwnedFd(nix::fcntl::open(
             path,
             OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_NONBLOCK,
             nix::sys::stat::Mode::empty(),
-        )?;
+        )?);
+
+        // Try to claim exclusive access to the port. This is performed even
+        // if the port will later be set as non-exclusive, in order to respect
+        // other applications that may have an exclusive port lock.
+        ioctl::tiocexcl(fd.0)?;
 
         let mut termios = MaybeUninit::uninit();
-        let res = unsafe { tcgetattr(fd, termios.as_mut_ptr()) };
-        if let Err(e) = nix::errno::Errno::result(res) {
-            close(fd);
-            return Err(e.into());
-        }
+        nix::errno::Errno::result(unsafe { tcgetattr(fd.0, termios.as_mut_ptr()) })?;
         let mut termios = unsafe { termios.assume_init() };
 
-        // If any of these steps fail, then we should abort creation of the
-        // TTYPort and ensure the file descriptor is closed.
-        // So we wrap these calls in a block and check the result.
+        // setup TTY for binary serial port access
+        // Enable reading from the port and ignore all modem control lines
+        termios.c_cflag |= libc::CREAD | libc::CLOCAL;
+        // Enable raw mode which disables any implicit processing of the input or output data streams
+        // This also sets no timeout period and a read will block until at least one character is
+        // available.
+        unsafe { cfmakeraw(&mut termios) };
+
+        // write settings to TTY
+        unsafe { tcsetattr(fd.0, libc::TCSANOW, &termios) };
+
+        // Read back settings from port and confirm they were applied correctly
+        let mut actual_termios = MaybeUninit::uninit();
+        unsafe { tcgetattr(fd.0, actual_termios.as_mut_ptr()) };
+        let actual_termios = unsafe { actual_termios.assume_init() };
+
+        if actual_termios.c_iflag != termios.c_iflag
+            || actual_termios.c_oflag != termios.c_oflag
+            || actual_termios.c_lflag != termios.c_lflag
+            || actual_termios.c_cflag != termios.c_cflag
         {
-            // setup TTY for binary serial port access
-            // Enable reading from the port and ignore all modem control lines
-            termios.c_cflag |= libc::CREAD | libc::CLOCAL;
-            // Enable raw mode which disables any implicit processing of the input or output data streams
-            // This also sets no timeout period and a read will block until at least one character is
-            // available.
-            unsafe { cfmakeraw(&mut termios) };
+            return Err(Error::new(
+                ErrorKind::Unknown,
+                "Settings did not apply correctly",
+            ));
+        };
 
-            // write settings to TTY
-            unsafe { tcsetattr(fd, libc::TCSANOW, &termios) };
-
-            // Read back settings from port and confirm they were applied correctly
-            let mut actual_termios = MaybeUninit::uninit();
-            unsafe { tcgetattr(fd, actual_termios.as_mut_ptr()) };
-            let actual_termios = unsafe { actual_termios.assume_init() };
-
-            if actual_termios.c_iflag != termios.c_iflag
-                || actual_termios.c_oflag != termios.c_oflag
-                || actual_termios.c_lflag != termios.c_lflag
-                || actual_termios.c_cflag != termios.c_cflag
-            {
-                return Err(Error::new(
-                    ErrorKind::Unknown,
-                    "Settings did not apply correctly",
-                ));
-            };
-
-            unsafe { tcflush(fd, libc::TCIOFLUSH) };
-
-            // clear O_NONBLOCK flag
-            fcntl(fd, F_SETFL(nix::fcntl::OFlag::empty()))?;
-
-            Ok(())
-        }
-        .map_err(|e: Error| {
-            close(fd);
-            e
-        })?;
+        // clear O_NONBLOCK flag
+        fcntl(fd.0, F_SETFL(nix::fcntl::OFlag::empty()))?;
 
         // Configure the low-level port settings
-        let mut termios = termios::get_termios(fd)?;
+        let mut termios = termios::get_termios(fd.0)?;
         termios::set_parity(&mut termios, builder.parity);
         termios::set_flow_control(&mut termios, builder.flow_control);
         termios::set_data_bits(&mut termios, builder.data_bits);
@@ -141,15 +153,15 @@ impl TTYPort {
         #[cfg(not(any(target_os = "ios", target_os = "macos")))]
         termios::set_baud_rate(&mut termios, builder.baud_rate);
         #[cfg(any(target_os = "ios", target_os = "macos"))]
-        termios::set_termios(fd, &termios, builder.baud_rate)?;
+        termios::set_termios(fd.0, &termios, builder.baud_rate)?;
         #[cfg(not(any(target_os = "ios", target_os = "macos")))]
-        termios::set_termios(fd, &termios)?;
+        termios::set_termios(fd.0, &termios)?;
 
         // Return the final port object
         Ok(TTYPort {
-            fd,
+            fd: fd.into_raw(),
             timeout: builder.timeout,
-            exclusive: false,
+            exclusive: true,
             port_name: Some(builder.path.clone()),
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             baud_rate: builder.baud_rate,

@@ -41,17 +41,24 @@ use crate::{Result, SerialPortInfo};
 #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "libudev"))]
 fn udev_property_as_string(d: &libudev::Device, key: &str) -> Option<String> {
     d.property_value(key)
-        .and_then(OsStr::to_str).map(|s| s.to_string())
+        .and_then(OsStr::to_str)
+        .map(|s| s.to_string())
 }
 
 /// Retrieves the udev property value named by `key`. This function assumes that the retrieved
 /// string is comprised of hex digits and the integer value of this will be returned as  a u16.
 /// If the property value doesn't exist or doesn't contain valid hex digits, then an error
 /// will be returned.
+/// This function uses a built-in type's `from_str_radix` to implementation to perform the
+/// actual conversion.
 #[cfg(all(target_os = "linux", not(target_env = "musl"), feature = "libudev"))]
-fn udev_hex_property_as_u16(d: &libudev::Device, key: &str) -> Result<u16> {
+fn udev_hex_property_as_int<T>(
+    d: &libudev::Device,
+    key: &str,
+    from_str_radix: &dyn Fn(&str, u32) -> std::result::Result<T, std::num::ParseIntError>,
+) -> Result<T> {
     if let Some(hex_str) = d.property_value(key).and_then(OsStr::to_str) {
-        if let Ok(num) = u16::from_str_radix(hex_str, 16) {
+        if let Ok(num) = from_str_radix(hex_str, 16) {
             Ok(num)
         } else {
             Err(Error::new(ErrorKind::Unknown, "value not hex string"))
@@ -67,13 +74,15 @@ fn port_type(d: &libudev::Device) -> Result<SerialPortType> {
         Some("usb") => {
             let serial_number = udev_property_as_string(d, "ID_SERIAL_SHORT");
             Ok(SerialPortType::UsbPort(UsbPortInfo {
-                vid: udev_hex_property_as_u16(d, "ID_VENDOR_ID")?,
-                pid: udev_hex_property_as_u16(d, "ID_MODEL_ID")?,
+                vid: udev_hex_property_as_int(d, "ID_VENDOR_ID", &u16::from_str_radix)?,
+                pid: udev_hex_property_as_int(d, "ID_MODEL_ID", &u16::from_str_radix)?,
                 serial_number,
                 manufacturer: udev_property_as_string(d, "ID_VENDOR_FROM_DATABASE")
                     .or_else(|| udev_property_as_string(d, "ID_VENDOR")),
                 product: udev_property_as_string(d, "ID_MODEL_FROM_DATABASE")
                     .or_else(|| udev_property_as_string(d, "ID_MODEL")),
+                interface: udev_hex_property_as_int(d, "ID_USB_INTERFACE_NUM", &u8::from_str_radix)
+                    .ok(),
             }))
         }
         Some("pci") => Ok(SerialPortType::PciPort),
@@ -87,7 +96,7 @@ fn get_parent_device_by_type(
     parent_type: *const c_char,
 ) -> Option<io_registry_entry_t> {
     let parent_type = unsafe { CStr::from_ptr(parent_type) };
-    use mach::kern_return::KERN_SUCCESS;
+    use mach2::kern_return::KERN_SUCCESS;
     let mut device = device;
     loop {
         let mut class_name = MaybeUninit::<[c_char; 128]>::uninit();
@@ -128,6 +137,12 @@ fn get_int_property(
             return None;
         }
         let num = match cf_number_type {
+            kCFNumberSInt8Type => {
+                let mut num: u8 = 0;
+                let num_ptr: *mut c_void = &mut num as *mut _ as *mut c_void;
+                CFNumberGetValue(container as CFNumberRef, cf_number_type, num_ptr);
+                Some(num as u32)
+            }
             kCFNumberSInt16Type => {
                 let mut num: u16 = 0;
                 let num_ptr: *mut c_void = &mut num as *mut _ as *mut c_void;
@@ -181,7 +196,12 @@ fn get_string_property(device_type: io_registry_entry_t, property: &str) -> Opti
 /// `IOIteratorNext`). Specific properties are extracted for USB devices.
 fn port_type(service: io_object_t) -> SerialPortType {
     let bluetooth_device_class_name = b"IOBluetoothSerialClient\0".as_ptr() as *const c_char;
-    if let Some(usb_device) = get_parent_device_by_type(service, kIOUSBDeviceClassName()) {
+    let usb_device_class_name = b"IOUSBHostDevice\0".as_ptr() as *const c_char;
+    let legacy_usb_device_class_name = kIOUSBDeviceClassName();
+
+    let maybe_usb_device = get_parent_device_by_type(service, usb_device_class_name)
+        .or_else(|| get_parent_device_by_type(service, legacy_usb_device_class_name));
+    if let Some(usb_device) = maybe_usb_device {
         SerialPortType::UsbPort(UsbPortInfo {
             vid: get_int_property(usb_device, "idVendor", kCFNumberSInt16Type).unwrap_or_default()
                 as u16,
@@ -190,6 +210,14 @@ fn port_type(service: io_object_t) -> SerialPortType {
             serial_number: get_string_property(usb_device, "USB Serial Number"),
             manufacturer: get_string_property(usb_device, "USB Vendor Name"),
             product: get_string_property(usb_device, "USB Product Name"),
+            // Apple developer documentation indicates `bInterfaceNumber` is the supported key for
+            // looking up the composite usb interface id. `idVendor` and `idProduct` are included in the same tables, so
+            // we will lookup the interface number using the same method. See:
+            //
+            // https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_driverkit_transport_usb
+            // https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/USBBook/USBOverview/USBOverview.html#//apple_ref/doc/uid/TP40002644-BBCEACAJ
+            interface: get_int_property(usb_device, "bInterfaceNumber", kCFNumberSInt8Type)
+                .map(|x| x as u8),
         })
     } else if get_parent_device_by_type(service, bluetooth_device_class_name).is_some() {
         SerialPortType::BluetoothPort
@@ -203,8 +231,8 @@ cfg_if! {
         /// Scans the system for serial ports and returns a list of them.
         /// The `SerialPortInfo` struct contains the name of the port which can be used for opening it.
         pub fn available_ports() -> Result<Vec<SerialPortInfo>> {
-            use mach::kern_return::KERN_SUCCESS;
-            use mach::port::{mach_port_t, MACH_PORT_NULL};
+            use mach2::kern_return::KERN_SUCCESS;
+            use mach2::port::{mach_port_t, MACH_PORT_NULL};
 
             let mut vec = Vec::new();
             unsafe {
@@ -286,35 +314,36 @@ cfg_if! {
                         0,
                     );
                     if result == KERN_SUCCESS {
-                        // We only care about the IODialinDevice, which is the device path for this port.
-                        let key = CString::new("IODialinDevice").unwrap();
-                        let key_cfstring = CFStringCreateWithCString(
-                            kCFAllocatorDefault,
-                            key.as_ptr(),
-                            kCFStringEncodingUTF8,
-                        );
-                        let value = CFDictionaryGetValue(props.assume_init(), key_cfstring as *const c_void);
-
-                        let type_id = CFGetTypeID(value);
-                        if type_id == CFStringGetTypeID() {
-                            let mut buf = Vec::with_capacity(256);
-
-                            CFStringGetCString(
-                                value as CFStringRef,
-                                buf.as_mut_ptr(),
-                                256,
+                        for key in ["IOCalloutDevice", "IODialinDevice"].iter() {
+                            let key = CString::new(*key).unwrap();
+                            let key_cfstring = CFStringCreateWithCString(
+                                kCFAllocatorDefault,
+                                key.as_ptr(),
                                 kCFStringEncodingUTF8,
                             );
-                            let path = CStr::from_ptr(buf.as_ptr()).to_string_lossy();
-                            vec.push(SerialPortInfo {
-                                port_name: path.to_string(),
-                                port_type: port_type(modem_service),
-                            });
-                        } else {
-                            return Err(Error::new(
-                                ErrorKind::Unknown,
-                                "Found invalid type for TypeID",
-                            ));
+                            let value = CFDictionaryGetValue(props.assume_init(), key_cfstring as *const c_void);
+
+                            let type_id = CFGetTypeID(value);
+                            if type_id == CFStringGetTypeID() {
+                                let mut buf = Vec::with_capacity(256);
+
+                                CFStringGetCString(
+                                    value as CFStringRef,
+                                    buf.as_mut_ptr(),
+                                    256,
+                                    kCFStringEncodingUTF8,
+                                );
+                                let path = CStr::from_ptr(buf.as_ptr()).to_string_lossy();
+                                vec.push(SerialPortInfo {
+                                    port_name: path.to_string(),
+                                    port_type: port_type(modem_service),
+                                });
+                            } else {
+                                return Err(Error::new(
+                                    ErrorKind::Unknown,
+                                    "Found invalid type for TypeID",
+                                ));
+                            }
                         }
                     } else {
                         return Err(Error::new(ErrorKind::Unknown, format!("ERROR: {}", result)));

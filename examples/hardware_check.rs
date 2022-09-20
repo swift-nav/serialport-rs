@@ -19,29 +19,30 @@ use std::io::Write;
 use std::str;
 use std::time::Duration;
 
-use clap::{App, AppSettings, Arg};
+use clap::{Arg, Command};
 
 use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 fn main() {
-    let matches = App::new("Serialport Example - Hardware Check")
+    let matches = Command::new("Serialport Example - Hardware Check")
         .about("Test hardware capabilities of serial ports")
-        .setting(AppSettings::DisableVersion)
-        .arg(Arg::with_name("port")
+        .disable_version_flag(true)
+        .arg(Arg::new("port")
              .help("The device path to a serial port")
-             .use_delimiter(false)
+             .use_value_delimiter(false)
              .required(true))
-        .arg(Arg::with_name("loopback")
+        .arg(Arg::new("loopback")
              .help("Run extra tests if the port is configured for hardware loopback. Mutually exclusive with the --loopback-port option")
-             .use_delimiter(false)
+             .use_value_delimiter(false)
              .conflicts_with("loopback-port")
              .long("loopback"))
-        .arg(Arg::with_name("loopback-port")
+        .arg(Arg::new("loopback-port")
              .help("The device path of a second serial port that is connected to the first serial port. Mutually exclusive with the --loopback option.")
-             .use_delimiter(false)
+             .use_value_delimiter(false)
              .takes_value(true)
              .long("loopback-port"))
         .get_matches();
+
     let port1_name = matches.value_of("port").unwrap();
     let port2_name = matches.value_of("loopback-port").unwrap_or("");
     let port1_loopback = matches.is_present("loopback");
@@ -246,11 +247,13 @@ fn test_single_port(port: &mut dyn serialport::SerialPort, loopback: bool) {
         .expect("Unable to write bytes.");
     println!("success");
 
-    print!("Testing data reception...");
     if loopback {
+        print!("Testing data reception...");
+        port.set_timeout(Duration::from_millis(250)).ok();
+
         let mut buf = [0u8; 12];
-        if port.read_exact(&mut buf).is_err() {
-            println!("FAILED");
+        if let Err(e) = port.read_exact(&mut buf) {
+            println!("FAILED ({})", e);
         } else {
             assert_eq!(
                 str::from_utf8(&buf).unwrap(),

@@ -16,11 +16,12 @@
 
 use std::error::Error;
 use std::io::{self, Read};
+use std::panic::panic_any;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use clap::{value_t, App, AppSettings, Arg};
+use clap::{Arg, ArgMatches, Command};
 
 use serialport::ClearBuffer;
 
@@ -31,25 +32,27 @@ fn main() {
         "The size in bytes of the block of data to write to the port (default: {} bytes)",
         DEFAULT_BLOCK_SIZE
     );
-    let matches = App::new("Serialport Example - Clear Output Buffer")
+
+    let matches = Command::new("Serialport Example - Clear Output Buffer")
         .about("Reports how many bytes are waiting to be read and allows the user to clear the output buffer")
-        .setting(AppSettings::DisableVersion)
-        .arg(Arg::with_name("port")
+        .disable_version_flag(true)
+        .arg(Arg::new("port")
              .help("The device path to a serial port")
-             .use_delimiter(false)
+             .use_value_delimiter(false)
              .required(true))
-        .arg(Arg::with_name("baud")
+        .arg(Arg::new("baud")
              .help("The baud rate to connect at")
-             .use_delimiter(false)
+             .use_value_delimiter(false)
              .required(true))
-        .arg(Arg::with_name("block-size")
-             .help(&block_size_help)
-             .use_delimiter(false)
+        .arg(Arg::new("block-size")
+             .help(Some(block_size_help.as_str()))
+             .use_value_delimiter(false)
              .default_value(DEFAULT_BLOCK_SIZE))
         .get_matches();
+
     let port_name = matches.value_of("port").unwrap();
     let baud_rate = matches.value_of("baud").unwrap();
-    let block_size = value_t!(matches, "block-size", usize).unwrap_or_else(|e| e.exit());
+    let block_size = ArgMatches::value_of_t(&matches, "block-size").unwrap_or_else(|e| e.exit());
 
     let exit_code = match run(port_name, baud_rate, block_size) {
         Ok(_) => 0,
@@ -123,7 +126,7 @@ fn input_service() -> mpsc::Receiver<()> {
                     break;
                 }
                 Ok(_) => tx.send(()).unwrap(), // Signal main to clear the buffer
-                Err(e) => panic!("{}", e),
+                Err(e) => panic_any(e),
             }
         }
     });

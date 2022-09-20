@@ -1,28 +1,28 @@
 use std::io::{self, Write};
 use std::time::Duration;
 
-use clap::{App, AppSettings, Arg};
+use clap::{Arg, Command};
 
 use serialport::{DataBits, StopBits};
 
 fn main() {
-    let matches = App::new("Serialport Example - Heartbeat")
+    let matches = Command::new("Serialport Example - Heartbeat")
         .about("Write bytes to a serial port at 1Hz")
-        .setting(AppSettings::DisableVersion)
+        .disable_version_flag(true)
         .arg(
-            Arg::with_name("port")
+            Arg::new("port")
                 .help("The device path to a serial port")
                 .required(true),
         )
         .arg(
-            Arg::with_name("baud")
+            Arg::new("baud")
                 .help("The baud rate to connect at")
-                .use_delimiter(false)
+                .use_value_delimiter(false)
                 .required(true)
                 .validator(valid_baud),
         )
         .arg(
-            Arg::with_name("stop-bits")
+            Arg::new("stop-bits")
                 .long("stop-bits")
                 .help("Number of stop bits to use")
                 .takes_value(true)
@@ -30,7 +30,7 @@ fn main() {
                 .default_value("1"),
         )
         .arg(
-            Arg::with_name("data-bits")
+            Arg::new("data-bits")
                 .long("data-bits")
                 .help("Number of data bits to use")
                 .takes_value(true)
@@ -38,20 +38,21 @@ fn main() {
                 .default_value("8"),
         )
         .arg(
-            Arg::with_name("rate")
+            Arg::new("rate")
                 .long("rate")
                 .help("Frequency (Hz) to repeat transmission of the pattern (0 indicates sending only once")
                 .takes_value(true)
                 .default_value("1"),
         )
         .arg(
-            Arg::with_name("string")
+            Arg::new("string")
                 .long("string")
                 .help("String to transmit")
                 .takes_value(true)
                 .default_value("."),
         )
         .get_matches();
+
     let port_name = matches.value_of("port").unwrap();
     let baud_rate = matches.value_of("baud").unwrap().parse::<u32>().unwrap();
     let stop_bits = match matches.value_of("stop-bits") {
@@ -96,7 +97,7 @@ fn main() {
     }
 }
 
-fn valid_baud(val: String) -> std::result::Result<(), String> {
+fn valid_baud(val: &str) -> std::result::Result<(), String> {
     val.parse::<u32>()
         .map(|_| ())
         .map_err(|_| format!("Invalid baud rate '{}' specified", val))
