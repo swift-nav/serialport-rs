@@ -25,12 +25,6 @@ use crate::{
     SerialPortBuilder, StopBits,
 };
 
-const fn duration_to_win_timeout(time: Duration) -> DWORD {
-    time.as_secs()
-        .saturating_mul(1000)
-        .saturating_add((time.subsec_nanos() as u64).saturating_div(1_000_000)) as DWORD
-}
-
 struct OverlappedHandle(pub HANDLE);
 
 impl OverlappedHandle {
@@ -206,30 +200,23 @@ impl COMPort {
         }
     }
 
-    ///Sets COM port timeouts.
-    ///
-    ///Comparing to `SerialPort::set_timeout` which only sets `read` timeout, this function allows
-    ///to specify all available timeouts.
-    ///
-    ///- `data` - This timeout specifies how long to wait for next byte, since arrival of at least
-    ///one byte. Once timeout expires, read returns with available data.
-    ///`SerialPort::set_timeout` uses 0 which means no timeout.
-    ///- `read` - Specifies overall timeout for `read` as `SerialPort::set_timeout`
-    ///- `write` - Specifies overall timeout for `write` operations.
-    pub fn set_timeouts(&mut self, data: Duration, read: Duration, write: Duration) -> Result<()> {
+    /// Sets COM port timeouts.
+    /// Uses the Blocking Read approach specified here:
+    /// https://gitlab.com/susurrus/serialport-rs/-/merge_requests/78#note_343695538
+    /// Appears to be faster than the Polling Read specification.
+    pub fn set_timeouts(&mut self) -> Result<()> {
         let mut timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: duration_to_win_timeout(data),
+            ReadIntervalTimeout: 1,
             ReadTotalTimeoutMultiplier: 0,
-            ReadTotalTimeoutConstant: duration_to_win_timeout(read),
+            ReadTotalTimeoutConstant: 0,
             WriteTotalTimeoutMultiplier: 0,
-            WriteTotalTimeoutConstant: duration_to_win_timeout(write),
+            WriteTotalTimeoutConstant: 0,
         };
 
         if unsafe { SetCommTimeouts(self.handle, &mut timeouts) } == 0 {
             return Err(super::error::last_os_error());
         }
 
-        self.timeout = read;
         Ok(())
     }
 }
@@ -360,8 +347,8 @@ impl SerialPort for COMPort {
     }
 
     #[inline]
-    fn set_timeout(&mut self, timeout: Duration) -> Result<()> {
-        self.set_timeouts(Duration::from_secs(0), timeout, Duration::from_secs(0))
+    fn set_timeout(&mut self, _timeout: Duration) -> Result<()> {
+        self.set_timeouts()
     }
 
     fn write_request_to_send(&mut self, level: bool) -> Result<()> {
